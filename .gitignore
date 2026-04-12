@@ -1,0 +1,10 @@
+# Build
+example/example
+*.test
+
+# OS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
