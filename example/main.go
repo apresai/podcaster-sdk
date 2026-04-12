@@ -37,9 +37,9 @@ func main() {
 
 	// 2. Start a wine & food blog podcast
 	job, err := client.Generate(ctx, podcaster.GenerateParams{
-		InputURL: "https://example.com/wine-blog-post",
+		InputURL: "https://en.wikipedia.org/wiki/Wine",
 		Category: "wine-food-blog",
-		Duration: podcaster.DurationStandard,
+		Duration: podcaster.DurationShort,
 	})
 	if err != nil {
 		log.Fatalf("Generate: %v", err)
