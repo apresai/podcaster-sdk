@@ -2,6 +2,9 @@
 example/example
 *.test
 
+# Integration test outputs
+example/*.mp3
+
 # OS
 .DS_Store
 
