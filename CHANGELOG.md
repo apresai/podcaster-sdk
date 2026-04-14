@@ -14,6 +14,88 @@ changes bump the minor version while the SDK is pre-1.0.
 
 ---
 
+## v0.3.0 — 2026-04-14
+
+### Added
+
+- **`Client.EstimatePodcast(ctx, params)`** — preflight estimate for a
+  podcast generation without starting a job or spending credits. Returns the
+  effective TTS provider after auto-upgrade rules, the credit cost, the
+  segment count estimate, the expected runtime, the fallback chain, and any
+  quota warnings. Use this before `Generate` to preview what a generation
+  will cost and which provider will actually run it.
+- **`Client.GetLimits(ctx)`** — returns the authenticated user's credit
+  balance and subscription state, plus the static rate-limit table for every
+  TTS provider and the credit cost for every duration. Read-only, no side
+  effects. Use this when an app needs to render a "what does each plan/duration
+  cost" comparison or check the user's remaining credits.
+- New types: `EstimateParams`, `EstimateResponse`, `EstimateQuota`,
+  `LimitsResponse`, `ProviderLimits`, `DurationInfo`, `SubscriptionInfo`.
+
+### Server changes reflected in this release
+
+These are changes on the production REST API (`podcasts.apresai.dev/api/v1`)
+that landed alongside this SDK release. They are live for every caller,
+regardless of SDK version.
+
+- New endpoint `POST /api/v1/podcasts/estimate` — preflight estimate.
+- New endpoint `GET /api/v1/limits` — credit balance, subscription state,
+  provider rate-limit table, duration cost table.
+- TTS retry resilience: per-minute `429` rate-limit responses on Vertex AI
+  now retry across a 3-minute wall-clock budget (8 attempts, 60s max
+  backoff) and fall over to the next provider in the chain
+  (`vertex-express → gemini-vertex → polly`) instead of failing the whole
+  job. Previously, the 5-attempt / 30s budget couldn't outlast a per-minute
+  quota window. This is invisible to SDK consumers — no API change — but
+  jobs that previously failed mid-synthesis will now complete.
+- Granular progress reporting during batch TTS: `Podcast.ProgressPercent`
+  now updates every ~8 seconds during the `20→90` window even when the
+  pipeline runs in batch mode (vertex-express, gemini-vertex on long/deep
+  durations). Previously the bar froze at 20 until the whole batch
+  finished. The interpolation is time-based with a `0.85` saturation cap,
+  so the real `0.90` "TTS complete" event always lands as a forward jump.
+- Auto-upgrade `gemini → vertex-express` for `long`/`deep` durations now
+  surfaces in the estimate response as `tts_upgraded: true` with a
+  human-readable `upgrade_reason`.
+
+### No upgrade required
+
+This release is purely additive. Existing code calling `Generate`,
+`GetPodcast`, `WaitForCompletion`, etc. continues to work unchanged. There
+is no `Upgrade from v0.2.0` block because there are no breaking changes.
+
+#### For AI agents introducing the new methods to existing code
+
+If a user asks you to "use the new estimate API" or "show the user what a
+generation will cost before they run it," the pattern is:
+
+```go
+est, err := client.EstimatePodcast(ctx, podcaster.EstimateParams{
+    Duration: podcaster.DurationStandard,
+    TTS:      "gemini",
+    Format:   podcaster.FormatConversation,
+})
+if err != nil {
+    return err
+}
+if est.TTSUpgraded {
+    fmt.Printf("Will use %s instead of %s: %s\n",
+        est.EffectiveTTS, est.RequestedTTS, est.UpgradeReason)
+}
+if !est.CanAfford {
+    fmt.Printf("Insufficient credits: need %d, have %d\n",
+        est.CreditCost, est.CreditBalance)
+    return nil
+}
+// then call client.Generate(...) with the same params
+```
+
+Always run `est, err := client.EstimatePodcast(...)` BEFORE `client.Generate(...)`
+when the user wants a credit-cost or provider preview. Do not duplicate the
+upgrade logic client-side — the server is the authoritative source.
+
+---
+
 ## v0.2.0 — 2026-04-13
 
 ### Changed

@@ -417,6 +417,118 @@ func (c *Client) ListVoices(ctx context.Context, provider string) ([]Voice, erro
 	return resp.Voices, nil
 }
 
+// --- Estimate / Limits ---
+
+// EstimateParams holds parameters for a preflight podcast estimate. Mirrors
+// GenerateParams but neither input field is required — the estimate is
+// independent of content. BYOK API keys, when present, set credit_cost to 0
+// and bypass_credits to true on the response.
+type EstimateParams struct {
+	Duration         string `json:"duration,omitempty"`
+	Format           string `json:"format,omitempty"`
+	TTS              string `json:"tts,omitempty"`
+	TTSModel         string `json:"tts_model,omitempty"`
+	GeminiAPIKey     string `json:"gemini_api_key,omitempty"`
+	ElevenLabsAPIKey string `json:"elevenlabs_api_key,omitempty"`
+}
+
+// EstimateQuota describes the static daily quota for a TTS provider.
+type EstimateQuota struct {
+	Provider    string `json:"provider"`
+	DailyLimit  int    `json:"daily_limit"`
+	WouldExceed bool   `json:"would_exceed"`
+	Note        string `json:"note,omitempty"`
+}
+
+// EstimateResponse is the result of a preflight podcast estimate.
+//
+// `EffectiveTTS` may differ from `RequestedTTS` when the server auto-upgrades
+// a request (e.g. gemini → vertex-express on long/deep durations). When that
+// happens, `TTSUpgraded` is true and `UpgradeReason` carries a human-readable
+// explanation. `CanAfford` is true when `BypassCredits` is set OR the user's
+// `CreditBalance` is at least `CreditCost`.
+type EstimateResponse struct {
+	RequestedTTS       string        `json:"requested_tts"`
+	EffectiveTTS       string        `json:"effective_tts"`
+	TTSUpgraded        bool          `json:"tts_upgraded"`
+	UpgradeReason      string        `json:"upgrade_reason,omitempty"`
+	Duration           string        `json:"duration"`
+	Format             string        `json:"format"`
+	SegmentEstimate    int           `json:"segment_estimate"`
+	MinuteEstimate     int           `json:"minute_estimate"`
+	CreditCost         int           `json:"credit_cost"`
+	CreditBalance      int           `json:"credit_balance"`
+	CreditBalanceAfter int           `json:"credit_balance_after"`
+	CanAfford          bool          `json:"can_afford"`
+	BypassCredits      bool          `json:"bypass_credits"`
+	FallbackChain      []string      `json:"fallback_chain"`
+	Quota              EstimateQuota `json:"quota"`
+	Warnings           []string      `json:"warnings"`
+}
+
+// EstimatePodcast returns a preflight estimate for a podcast generation
+// without starting a job or spending credits. Use this before Generate to
+// preview the credit cost, the effective TTS provider after auto-upgrade
+// rules, the segment count, the fallback chain, and any warnings.
+//
+// Estimate and Generate share the same Go primitives on the server, so the
+// estimate is structurally guaranteed to match what Generate will actually do
+// for the same parameters (assuming the Lambda's environment doesn't change
+// between calls).
+func (c *Client) EstimatePodcast(ctx context.Context, params EstimateParams) (*EstimateResponse, error) {
+	var resp EstimateResponse
+	if err := c.post(ctx, "/podcasts/estimate", params, &resp); err != nil {
+		return nil, fmt.Errorf("estimate: %w", err)
+	}
+	return &resp, nil
+}
+
+// ProviderLimits describes the static rate-limit configuration for a single
+// TTS provider as the pipeline runs it.
+type ProviderLimits struct {
+	Name             string `json:"name"`
+	Concurrency      int    `json:"concurrency"`
+	InterDelayMs     int64  `json:"inter_delay_ms"`
+	DailyQuota       int    `json:"daily_quota"`
+	IsBatchCapable   bool   `json:"is_batch_capable"`
+	CreditMultiplier int    `json:"credit_multiplier"`
+}
+
+// DurationInfo describes the credit cost and runtime estimate for a duration.
+type DurationInfo struct {
+	Name            string `json:"name"`
+	Credits         int    `json:"credits"`
+	SegmentEstimate int    `json:"segment_estimate"`
+	MinuteEstimate  int    `json:"minute_estimate"`
+}
+
+// SubscriptionInfo describes the user's current Stripe subscription state.
+type SubscriptionInfo struct {
+	Plan            string `json:"plan,omitempty"`
+	Status          string `json:"status,omitempty"`
+	CreditsPerCycle int    `json:"credits_per_cycle,omitempty"`
+	LastRefill      string `json:"last_refill,omitempty"`
+}
+
+// LimitsResponse is the result of GetLimits.
+type LimitsResponse struct {
+	CreditBalance int              `json:"credit_balance"`
+	Subscription  SubscriptionInfo `json:"subscription"`
+	Providers     []ProviderLimits `json:"providers"`
+	Durations     []DurationInfo   `json:"durations"`
+}
+
+// GetLimits returns the authenticated user's credit balance and subscription
+// state, plus the static rate-limit table for every TTS provider and the
+// credit cost for every duration. Read-only, no side effects.
+func (c *Client) GetLimits(ctx context.Context) (*LimitsResponse, error) {
+	var resp LimitsResponse
+	if err := c.get(ctx, "/limits", nil, &resp); err != nil {
+		return nil, fmt.Errorf("get limits: %w", err)
+	}
+	return &resp, nil
+}
+
 // --- HTTP helpers ---
 
 func (c *Client) get(ctx context.Context, path string, params url.Values, out any) error {
