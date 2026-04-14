@@ -4,6 +4,8 @@ Go client library for the [Podcaster REST API](https://podcasts.apresai.dev/api/
 
 Generate podcasts from text or URLs, poll for completion, and download audio — all from your Go application.
 
+See [CHANGELOG.md](./CHANGELOG.md) for release notes and per-version upgrade guides (including machine-readable instructions for AI coding assistants).
+
 ## Installation
 
 ```bash
