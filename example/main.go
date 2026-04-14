@@ -49,7 +49,7 @@ func main() {
 	// 3. Wait for completion with progress updates
 	podcast, err := client.WaitForCompletion(ctx, job.ID, &podcaster.WaitOptions{
 		OnProgress: func(p podcaster.Podcast) {
-			fmt.Printf("  [%s] %.0f%% — %s\n", p.Status, p.ProgressPercent*100, p.StageMessage)
+			fmt.Printf("  [%s] %d%% — %s\n", p.Status, p.ProgressPercent, p.StageMessage)
 		},
 	})
 	if err != nil {

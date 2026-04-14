@@ -154,6 +154,12 @@ type GenerateResponse struct {
 
 // Generate starts a podcast generation job and returns immediately.
 // Use GetPodcast or WaitForCompletion to check on the result.
+//
+// If params.Visibility is empty the podcast defaults to private. Pass
+// VisibilityPublic explicitly to list the podcast on the public feed.
+//
+// Returns an *APIError with StatusCode 422 when the server rejects the
+// input (bad URL, validation failure) and 502 for infrastructure errors.
 func (c *Client) Generate(ctx context.Context, params GenerateParams) (*GenerateResponse, error) {
 	var resp GenerateResponse
 	if err := c.post(ctx, "/podcasts", params, &resp); err != nil {
@@ -175,7 +181,7 @@ type Podcast struct {
 	ScriptURL       string    `json:"script_url,omitempty"`
 	Duration        string    `json:"duration,omitempty"`
 	FileSizeMB      float64   `json:"file_size_mb,omitempty"`
-	ProgressPercent float64   `json:"progress_percent,omitempty"`
+	ProgressPercent int       `json:"progress_percent,omitempty"`
 	StageMessage    string    `json:"stage_message,omitempty"`
 	Model           string    `json:"model,omitempty"`
 	TTSProvider     string    `json:"tts_provider,omitempty"`

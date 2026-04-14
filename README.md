@@ -90,18 +90,21 @@ client := podcaster.NewClient("pk_...",
 
 ```go
 job, err := client.Generate(ctx, podcaster.GenerateParams{
-    InputURL:  "https://...",       // or InputText: "raw content..."
-    Category:  "wine-food-blog",    // optional
-    Model:     "sonnet",            // haiku, sonnet, gemini-flash, gemini-pro
-    TTS:       "gemini",            // gemini, elevenlabs, google
-    Tone:      podcaster.ToneCasual,
-    Duration:  podcaster.DurationStandard,
-    Format:    podcaster.FormatConversation,
-    Voices:    2,
-    Topic:     "focus on pairings",
-    Style:     "humor,storytelling",
+    InputURL:   "https://...",      // or InputText: "raw content..."
+    Category:   "wine-food-blog",   // optional
+    Model:      "sonnet",           // haiku, sonnet, gemini-flash, gemini-pro
+    TTS:        "gemini",           // gemini, elevenlabs, google
+    Tone:       podcaster.ToneCasual,
+    Duration:   podcaster.DurationStandard,
+    Format:     podcaster.FormatConversation,
+    Voices:     2,
+    Topic:      "focus on pairings",
+    Style:      "humor,storytelling",
+    Visibility: podcaster.VisibilityPublic, // defaults to private if omitted
 })
 ```
+
+> **Note:** SDK callers get **private** podcasts by default. Pass `Visibility: podcaster.VisibilityPublic` to list on the public feed at `podcasts.apresai.dev`.
 
 ### Poll & Wait
 
@@ -114,7 +117,7 @@ podcast, err := client.WaitForCompletion(ctx, "podcast-id", &podcaster.WaitOptio
     PollInterval: 3 * time.Second,
     Timeout:      15 * time.Minute,
     OnProgress: func(p podcaster.Podcast) {
-        fmt.Printf("[%s] %.0f%%\n", p.Status, p.ProgressPercent*100)
+        fmt.Printf("[%s] %d%%\n", p.Status, p.ProgressPercent)
     },
 })
 ```
@@ -153,12 +156,28 @@ for _, v := range voices {
 
 ## Error Handling
 
+All HTTP errors surface as `*podcaster.APIError`. For `POST /podcasts`:
+
+| Status | Meaning |
+|--------|---------|
+| `401` | Invalid or missing API key |
+| `402` | Out of credits (upgrade your plan) |
+| `422` | Invalid input — bad URL, extraction failed, validation error |
+| `502` | Infrastructure error — transient, safe to retry |
+
 ```go
 job, err := client.Generate(ctx, params)
 if err != nil {
     var apiErr *podcaster.APIError
     if errors.As(err, &apiErr) {
-        fmt.Printf("API error %d: %s\n", apiErr.StatusCode, apiErr.Message)
+        switch apiErr.StatusCode {
+        case 422:
+            fmt.Printf("bad input: %s\n", apiErr.Message)
+        case 502:
+            fmt.Printf("transient, retrying: %s\n", apiErr.Message)
+        default:
+            fmt.Printf("API error %d: %s\n", apiErr.StatusCode, apiErr.Message)
+        }
     }
 }
 ```
