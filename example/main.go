@@ -35,13 +35,26 @@ func main() {
 	}
 	fmt.Println()
 
-	// 2. Start a wine & food blog podcast
+	// 2. Start a wine & food blog podcast. AllowProviderSwap is left false
+	// (default) so the server pins the requested TTS provider end-to-end.
+	// If you'd rather have the server silently fall back to a sibling
+	// provider on quota / empty-audio errors, set AllowProviderSwap: true
+	// — but voices may drift mid-episode because sibling providers use
+	// different synthesis engines. Leave it false for brand voices.
 	job, err := client.Generate(ctx, podcaster.GenerateParams{
 		InputURL: "https://en.wikipedia.org/wiki/Wine",
 		Category: "wine-food-blog",
 		Duration: podcaster.DurationShort,
 	})
 	if err != nil {
+		// Quota errors (pre-flight 429 or mid-job failure) come back as a
+		// typed *APIError with Code == "quota_exhausted" and a ResetsAt
+		// timestamp. Don't retry — the quota is daily.
+		if podcaster.IsQuotaError(err) {
+			resetsAt := podcaster.QuotaResetsAt(err)
+			log.Fatalf("TTS quota exhausted; try again after %s (or pick vertex-express, gemini-vertex, google for higher quotas)",
+				resetsAt.Local().Format("3:04 PM MST"))
+		}
 		log.Fatalf("Generate: %v", err)
 	}
 	fmt.Printf("Started podcast %s (estimated %d minutes)\n", job.ID, job.EstimatedMinutes)
@@ -53,6 +66,12 @@ func main() {
 		},
 	})
 	if err != nil {
+		// Mid-job quota failures also surface as *APIError from
+		// WaitForCompletion. Same branch, same non-retry rule.
+		if podcaster.IsQuotaError(err) {
+			resetsAt := podcaster.QuotaResetsAt(err)
+			log.Fatalf("TTS quota hit mid-job; try again after %s", resetsAt.Local().Format("3:04 PM MST"))
+		}
 		log.Fatalf("Wait: %v", err)
 	}
 

@@ -25,6 +25,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -141,6 +142,18 @@ type GenerateParams struct {
 	TTSPitch       float64 `json:"tts_pitch,omitempty"`
 	TTSTemperature float64 `json:"tts_temperature,omitempty"`
 	Visibility     string  `json:"visibility,omitempty"`
+
+	// AllowProviderSwap re-enables the server's legacy best-effort TTS
+	// behavior: pre-emptive gemini → vertex-express auto-upgrade for
+	// long/deep durations, and mid-run fallback to a sibling provider on
+	// quota exhaustion or persistent empty-audio errors. Default false
+	// — the server pins the requested provider end-to-end and fails
+	// loudly with a QuotaExhaustedError (HTTP 429 or a failed-status
+	// poll response with Code == "quota_exhausted"). Leave false when
+	// voice-identity consistency matters (brand voices, multi-episode
+	// series). Set true only for bulk / throwaway runs where "just give
+	// me an MP3" trumps voice pinning.
+	AllowProviderSwap bool `json:"allow_provider_swap,omitempty"`
 }
 
 // GenerateResponse is returned when a generation job is started.
@@ -200,6 +213,16 @@ type Podcast struct {
 	PlayCount       int       `json:"play_count,omitempty"`
 	CreatedAt       string    `json:"created_at,omitempty"`
 	Error           string    `json:"error,omitempty"`
+
+	// Typed failure metadata — populated when Status == "failed" and the
+	// server recognized the failure class. Today only ErrorCode ==
+	// "quota_exhausted" is emitted. Use IsQuotaError(err) on errors
+	// returned from WaitForCompletion instead of parsing these fields by
+	// hand unless you need the reset timestamp directly.
+	ErrorCode         string `json:"error_code,omitempty"`
+	ErrorProvider     string `json:"error_provider,omitempty"`
+	QuotaResetsAt     string `json:"quota_resets_at,omitempty"`
+	RetryAfterSeconds int64  `json:"retry_after_seconds,omitempty"`
 }
 
 // Citation is a reference to an expert, critic, or publication cited in the podcast.
@@ -341,6 +364,24 @@ func (c *Client) WaitForCompletion(ctx context.Context, id string, opts *WaitOpt
 			if errMsg == "" {
 				errMsg = "unknown error"
 			}
+			// Quota failures surface as a typed *APIError so callers can
+			// branch retry logic via IsQuotaError / QuotaResetsAt without
+			// parsing the Error string. Other failures keep the original
+			// plain-error shape for backward compatibility.
+			if podcast.ErrorCode == "quota_exhausted" {
+				apiErr := &APIError{
+					StatusCode: 200, // GET succeeded; the podcast failed
+					Message:    errMsg,
+					Code:       podcast.ErrorCode,
+					Provider:   podcast.ErrorProvider,
+				}
+				if podcast.QuotaResetsAt != "" {
+					if t, err := time.Parse(time.RFC3339, podcast.QuotaResetsAt); err == nil {
+						apiErr.ResetsAt = t
+					}
+				}
+				return nil, apiErr
+			}
 			return nil, fmt.Errorf("podcast generation failed: %s", errMsg)
 		}
 
@@ -430,6 +471,12 @@ type EstimateParams struct {
 	TTSModel         string `json:"tts_model,omitempty"`
 	GeminiAPIKey     string `json:"gemini_api_key,omitempty"`
 	ElevenLabsAPIKey string `json:"elevenlabs_api_key,omitempty"`
+
+	// AllowProviderSwap must match the value you plan to pass to Generate
+	// for the estimate to predict what the actual run will do. When false
+	// (default), the estimate reports EffectiveTTS == TTS and an empty
+	// FallbackChain to match the server's strict-pinning runtime.
+	AllowProviderSwap bool `json:"allow_provider_swap,omitempty"`
 }
 
 // EstimateQuota describes the static daily quota for a TTS provider.
@@ -452,6 +499,7 @@ type EstimateResponse struct {
 	EffectiveTTS       string        `json:"effective_tts"`
 	TTSUpgraded        bool          `json:"tts_upgraded"`
 	UpgradeReason      string        `json:"upgrade_reason,omitempty"`
+	AllowProviderSwap  bool          `json:"allow_provider_swap"`
 	Duration           string        `json:"duration"`
 	Format             string        `json:"format"`
 	SegmentEstimate    int           `json:"segment_estimate"`
@@ -574,15 +622,29 @@ func (c *Client) doRequest(req *http.Request, out any) error {
 
 	// Handle non-success status codes
 	if resp.StatusCode >= 400 {
+		// Typed error body: includes machine-readable error_code and, for
+		// quota failures, the provider + reset timestamp. New in v0.4.0.
 		var apiErr struct {
-			Error  string `json:"error"`
-			Status int    `json:"status"`
+			Error             string `json:"error"`
+			Status            int    `json:"status"`
+			ErrorCode         string `json:"error_code"`
+			Provider          string `json:"provider"`
+			ResetsAt          string `json:"resets_at"`
+			RetryAfterSeconds int64  `json:"retry_after_seconds"`
 		}
 		if json.Unmarshal(respBody, &apiErr) == nil && apiErr.Error != "" {
-			return &APIError{
+			e := &APIError{
 				StatusCode: resp.StatusCode,
 				Message:    apiErr.Error,
+				Code:       apiErr.ErrorCode,
+				Provider:   apiErr.Provider,
 			}
+			if apiErr.ResetsAt != "" {
+				if t, err := time.Parse(time.RFC3339, apiErr.ResetsAt); err == nil {
+					e.ResetsAt = t
+				}
+			}
+			return e
 		}
 		return &APIError{
 			StatusCode: resp.StatusCode,
@@ -602,11 +664,61 @@ func (c *Client) doRequest(req *http.Request, out any) error {
 }
 
 // APIError is returned when the API responds with a non-success status code.
+//
+// For classified server-side failures (today: quota exhaustion), Code is a
+// stable machine-readable identifier and Provider / ResetsAt are populated
+// so callers can make retry decisions without parsing the Message string.
+// Use IsQuotaError / QuotaResetsAt instead of switching on Code by hand.
 type APIError struct {
 	StatusCode int
 	Message    string
+
+	// Code is a stable machine-readable error identifier. Populated for
+	// classified failures (today only "quota_exhausted"); empty for
+	// generic errors. New in v0.4.0.
+	Code string
+
+	// Provider carries the TTS provider that caused the failure for
+	// quota errors. Zero-value otherwise.
+	Provider string
+
+	// ResetsAt is the timestamp at which the provider's daily quota
+	// resets, populated for Code == "quota_exhausted" on Google-family
+	// providers (gemini, google, vertex-express, gemini-vertex reset at
+	// 00:00 America/Los_Angeles). Zero-value when the reset time is not
+	// calculable (ElevenLabs monthly, generic errors).
+	ResetsAt time.Time
 }
 
 func (e *APIError) Error() string {
+	if e.Code == "quota_exhausted" && !e.ResetsAt.IsZero() {
+		return fmt.Sprintf("podcaster API error (HTTP %d, %s): %s (resets at %s)",
+			e.StatusCode, e.Code, e.Message, e.ResetsAt.Format(time.RFC3339))
+	}
+	if e.Code != "" {
+		return fmt.Sprintf("podcaster API error (HTTP %d, %s): %s", e.StatusCode, e.Code, e.Message)
+	}
 	return fmt.Sprintf("podcaster API error (HTTP %d): %s", e.StatusCode, e.Message)
+}
+
+// IsQuotaError returns true when err is an *APIError with
+// Code == "quota_exhausted". Use this in retry logic — quota errors
+// should NEVER be retried automatically, because the quota is daily
+// and retrying within the same window just burns attempts.
+func IsQuotaError(err error) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.Code == "quota_exhausted"
+}
+
+// QuotaResetsAt extracts the reset timestamp from a quota error. Returns
+// the zero value when err is not a quota error or when the server could
+// not determine the reset time (e.g. ElevenLabs monthly cap). Call this
+// on errors from Generate, GetPodcast, or WaitForCompletion to decide
+// when to tell the user they can try again.
+func QuotaResetsAt(err error) time.Time {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) && apiErr.Code == "quota_exhausted" {
+		return apiErr.ResetsAt
+	}
+	return time.Time{}
 }

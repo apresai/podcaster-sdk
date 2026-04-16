@@ -14,6 +14,145 @@ changes bump the minor version while the SDK is pre-1.0.
 
 ---
 
+## v0.4.0 — 2026-04-15
+
+### Added
+
+- **`GenerateParams.AllowProviderSwap`**, **`EstimateParams.AllowProviderSwap`**,
+  **`EstimateResponse.AllowProviderSwap`** — boolean fields, default
+  `false`. When `true`, re-enables the server's legacy best-effort TTS
+  behavior: pre-emptive `gemini → vertex-express` upgrade for `long` /
+  `deep` durations, and mid-run fallback to a sibling provider on quota
+  exhaustion or persistent empty-audio errors. Leave unset (the new
+  default) for strict voice-identity pinning — the server uses the
+  requested provider end-to-end and surfaces quota failures as typed
+  errors you can handle.
+- **`APIError.Code`**, **`APIError.Provider`**, **`APIError.ResetsAt`** —
+  new fields on the existing error type. Populated for classified
+  server-side failures (today only `Code == "quota_exhausted"`). The
+  `APIError.Error()` string now includes the reset timestamp when one
+  is known.
+- **`IsQuotaError(err) bool`** — reports whether err is a typed
+  quota-exhausted error. Use this in retry logic to SKIP quota errors
+  (retrying daily quotas within the same day just wastes attempts).
+- **`QuotaResetsAt(err) time.Time`** — extracts the quota reset
+  timestamp from a typed quota error. Returns the zero value for
+  non-quota errors or when the server could not calculate a reset time
+  (e.g. ElevenLabs monthly cap).
+- **`Podcast.ErrorCode`**, **`Podcast.ErrorProvider`**,
+  **`Podcast.QuotaResetsAt`**, **`Podcast.RetryAfterSeconds`** — new
+  fields populated on failed podcasts when the server classified the
+  failure. Most callers should prefer `IsQuotaError(err)` on the error
+  from `WaitForCompletion`; these fields are the raw values for
+  callers that use `GetPodcast` directly.
+
+### Server changes reflected in this release
+
+These are changes on the production REST API
+(`podcasts.apresai.dev/api/v1`) that landed alongside this SDK release.
+They are live for every caller, regardless of SDK version — listing
+them here so you know the server contract you're talking to.
+
+- **Strict TTS provider pinning is now the default.** Previously the
+  server auto-upgraded `gemini → vertex-express` when you picked a
+  `long` or `deep` duration on gemini (to dodge Gemini AI Studio's
+  100-request/day RPD ceiling). It also silently fell back to a sibling
+  provider mid-run when the active provider hit its quota or returned
+  persistent empty audio. Neither of those happens by default anymore
+  — the server uses the requested provider end-to-end and fails loudly
+  on quota errors. Set `AllowProviderSwap: true` on your
+  `GenerateParams` to restore the old behavior (see Upgrade from
+  v0.3.0 below).
+- **Pre-flight quota check on `POST /api/v1/podcasts`.** When the
+  requested provider + duration combination is detectable-ahead as
+  exceeding the provider's daily quota (and `AllowProviderSwap` is
+  false), the server returns HTTP 429 immediately instead of starting
+  the job. No credits are deducted. The response includes
+  `error_code: "quota_exhausted"`, `provider`, `resets_at`,
+  `retry_after_seconds`, and a `Retry-After` header per RFC 7231. The
+  SDK converts this into an `*APIError` with `Code == "quota_exhausted"`
+  and a populated `ResetsAt`.
+- **`GET /api/v1/podcasts/{id}` now exposes `error_code`,
+  `error_provider`, `quota_resets_at`, and `retry_after_seconds`** on
+  failed-status responses so mid-job quota failures (pre-flight passed
+  but TTS hit quota during synthesis) are distinguishable from generic
+  failures. The SDK's `WaitForCompletion` wraps these into the same
+  typed `*APIError` you get from `Generate`.
+- **Voice-identity consistency is the contract.** Same voice name
+  (`Kore`) on Gemini AI Studio and Cloud TTS Chirp 3 HD is produced by
+  different synthesis engines and sounds audibly different. The strict
+  default protects callers doing brand voices or multi-episode series
+  from silent mid-episode drift.
+
+### Upgrade from v0.3.0
+
+**No code change is required** — all new fields default to zero/false
+which matches the server's new strict default. Existing code compiles
+unchanged. However, your runtime behavior WILL change if you previously
+relied on `gemini + long` or `gemini + deep` working through the
+server's auto-upgrade. Those combinations will now fail with a quota
+error, and your app needs to handle the new `*APIError` shape.
+
+**Required action:** audit every `client.Generate` / `client.WaitForCompletion`
+call site and decide whether each one wants strict pinning (the new
+default) or best-effort fallback (opt in via `AllowProviderSwap: true`).
+
+Mechanical handling pattern for every call site:
+
+```go
+job, err := client.Generate(ctx, params)
+if err != nil {
+    if podcaster.IsQuotaError(err) {
+        resetsAt := podcaster.QuotaResetsAt(err)
+        // Surface to user — DO NOT retry automatically. The quota is
+        // daily; retrying within the same day just burns attempts.
+        fmt.Printf("quota exhausted; resets at %s\n", resetsAt.Local())
+        return
+    }
+    // Other errors keep the old shape — handle as before.
+    return fmt.Errorf("generate: %w", err)
+}
+```
+
+Apply the same `IsQuotaError(err)` check to errors from
+`WaitForCompletion` and `GetPodcast`.
+
+#### Agent upgrade checklist
+
+1. Run `grep -rn 'podcaster\.GenerateParams' <user-project>`. For each
+   call site, check the `TTS` and `Duration` fields:
+   - **`TTS: "gemini"` combined with `Duration: podcaster.DurationLong`
+     or `DurationDeep`** — ask the user whether this code needs strict
+     voice pinning (new default, may fail with quota) or the old
+     auto-upgrade behavior. If they want the old behavior, add
+     `AllowProviderSwap: true` to the struct literal. If they want
+     strict pinning, leave it unset but make sure the error handler
+     checks `IsQuotaError(err)` and surfaces the reset time to the user.
+   - **Any other combination** — no action required.
+2. Run `grep -rn 'client\.Generate\b' <user-project>` and
+   `grep -rn 'WaitForCompletion' <user-project>`. Every error handler
+   that currently does `if err != nil` or
+   `var apiErr *podcaster.APIError` needs an `IsQuotaError(err)` branch
+   BEFORE any retry logic. Retrying on quota errors is strictly worse
+   than failing loudly — the quota is daily, so the retry will just
+   hit the same wall until midnight Pacific.
+3. Run `grep -rn 'errors\.As.*APIError' <user-project>`. If the user is
+   already switching on `apiErr.StatusCode`, suggest adding a case for
+   `apiErr.Code == "quota_exhausted"` that surfaces
+   `apiErr.ResetsAt.Local()` to the user.
+4. For SDK callers that use `client.EstimatePodcast(...)` and read the
+   `EffectiveTTS` / `TTSUpgraded` / `FallbackChain` fields: these are
+   still emitted, but when `AllowProviderSwap` is false (the default)
+   `EffectiveTTS == RequestedTTS`, `TTSUpgraded == false`, and
+   `FallbackChain` is empty to match what the runtime will actually
+   do. If a UI showed "Will use vertex-express instead of gemini," that
+   banner will stop rendering — verify that's the desired behavior, or
+   pass `AllowProviderSwap: true` on the estimate AND generate calls
+   together.
+5. Run `go build ./... && go vet ./...` to verify.
+
+---
+
 ## v0.3.0 — 2026-04-14
 
 ### Added
