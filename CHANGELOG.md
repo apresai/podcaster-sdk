@@ -14,6 +14,60 @@ changes bump the minor version while the SDK is pre-1.0.
 
 ---
 
+## v0.5.1 — 2026-04-18
+
+### Server changes reflected in this release
+
+No Go code changes in the SDK. This release documents a new value on an
+existing server-side enum that your code may switch on.
+
+- **New `error_code` value: `empty_audio_persistent`.** The server now
+  emits this code when a TTS provider returns empty or tiny audio
+  repeatedly for the same segment after the retry budget is exhausted.
+  Credits are refunded. Recommended recovery: retry the request with a
+  different `tts` provider (for example, switch from `gemini` to
+  `google` or `vertex-express`).
+
+  The `Podcast.ErrorCode` field type is unchanged (`string`), so your
+  code compiles without any modification. If you have a `switch` that
+  handles specific error codes, consider adding a case for this value:
+
+  ```go
+  switch podcast.ErrorCode {
+  case "quota_exhausted":
+      // wait until podcaster.QuotaResetsAt(err) or pick a higher-quota provider
+  case "empty_audio_persistent":
+      // retry with a different tts provider — this one can't synthesize this text
+  case "shutdown", "stuck":
+      // server-side interrupt; caller can safely re-submit
+  case "panic":
+      // server bug; credits refunded; do not retry without debug info
+  }
+  ```
+
+- **Server-side reliability fixes (non-wire)**: the server now avoids a
+  race where its own startup orphan scanner falsely marked long-running
+  pipelines as failed during TTS retry backoffs. This was driving a
+  steady 0-for-N failure pattern on certain articles. No client impact
+  beyond higher success rates.
+
+- **Retry budget tightened server-side**: TTS retries cut from 8 attempts
+  (up to 60s backoff) to 3 attempts (up to 15s backoff). The pipeline's
+  second-layer per-segment repair still provides ~9 total attempts per
+  unrecoverable segment over ~2 minutes (was ~20 minutes). Your client
+  code sees faster failure-path completion when a segment genuinely
+  cannot be synthesized; credits refund cleanly as before.
+
+### Upgrade from v0.5.0
+
+No code change required. The `error_code` field type is unchanged; only
+a new enum value has been added. If you want to handle the new value
+specifically, add a case to any `switch` on `Podcast.ErrorCode` (see
+example above). Your existing code continues to work — unhandled codes
+will fall through to your default branch if you have one.
+
+---
+
 ## v0.5.0 — 2026-04-17
 
 ### Removed
