@@ -95,7 +95,7 @@ job, err := client.Generate(ctx, podcaster.GenerateParams{
     InputURL:   "https://...",      // or InputText: "raw content..."
     Category:   "wine-food-blog",   // optional
     Model:      "sonnet",           // haiku, sonnet, gemini-flash, gemini-pro
-    TTS:        "gemini",           // gemini, elevenlabs, google
+    TTS:        "gemini",           // gemini, vertex-express, gemini-vertex, google, polly
     Tone:       podcaster.ToneCasual,
     Duration:   podcaster.DurationStandard,
     Format:     podcaster.FormatConversation,

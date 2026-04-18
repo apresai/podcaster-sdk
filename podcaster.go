@@ -138,22 +138,9 @@ type GenerateParams struct {
 	Voice3         string  `json:"voice3,omitempty"`
 	TTSModel       string  `json:"tts_model,omitempty"`
 	TTSSpeed       float64 `json:"tts_speed,omitempty"`
-	TTSStability   float64 `json:"tts_stability,omitempty"`
 	TTSPitch       float64 `json:"tts_pitch,omitempty"`
 	TTSTemperature float64 `json:"tts_temperature,omitempty"`
 	Visibility     string  `json:"visibility,omitempty"`
-
-	// AllowProviderSwap re-enables the server's legacy best-effort TTS
-	// behavior: pre-emptive gemini → vertex-express auto-upgrade for
-	// long/deep durations, and mid-run fallback to a sibling provider on
-	// quota exhaustion or persistent empty-audio errors. Default false
-	// — the server pins the requested provider end-to-end and fails
-	// loudly with a QuotaExhaustedError (HTTP 429 or a failed-status
-	// poll response with Code == "quota_exhausted"). Leave false when
-	// voice-identity consistency matters (brand voices, multi-episode
-	// series). Set true only for bulk / throwaway runs where "just give
-	// me an MP3" trumps voice pinning.
-	AllowProviderSwap bool `json:"allow_provider_swap,omitempty"`
 }
 
 // GenerateResponse is returned when a generation job is started.
@@ -465,18 +452,11 @@ func (c *Client) ListVoices(ctx context.Context, provider string) ([]Voice, erro
 // independent of content. BYOK API keys, when present, set credit_cost to 0
 // and bypass_credits to true on the response.
 type EstimateParams struct {
-	Duration         string `json:"duration,omitempty"`
-	Format           string `json:"format,omitempty"`
-	TTS              string `json:"tts,omitempty"`
-	TTSModel         string `json:"tts_model,omitempty"`
-	GeminiAPIKey     string `json:"gemini_api_key,omitempty"`
-	ElevenLabsAPIKey string `json:"elevenlabs_api_key,omitempty"`
-
-	// AllowProviderSwap must match the value you plan to pass to Generate
-	// for the estimate to predict what the actual run will do. When false
-	// (default), the estimate reports EffectiveTTS == TTS and an empty
-	// FallbackChain to match the server's strict-pinning runtime.
-	AllowProviderSwap bool `json:"allow_provider_swap,omitempty"`
+	Duration     string `json:"duration,omitempty"`
+	Format       string `json:"format,omitempty"`
+	TTS          string `json:"tts,omitempty"`
+	TTSModel     string `json:"tts_model,omitempty"`
+	GeminiAPIKey string `json:"gemini_api_key,omitempty"`
 }
 
 // EstimateQuota describes the static daily quota for a TTS provider.
@@ -489,17 +469,12 @@ type EstimateQuota struct {
 
 // EstimateResponse is the result of a preflight podcast estimate.
 //
-// `EffectiveTTS` may differ from `RequestedTTS` when the server auto-upgrades
-// a request (e.g. gemini → vertex-express on long/deep durations). When that
-// happens, `TTSUpgraded` is true and `UpgradeReason` carries a human-readable
-// explanation. `CanAfford` is true when `BypassCredits` is set OR the user's
-// `CreditBalance` is at least `CreditCost`.
+// `CanAfford` is true when `BypassCredits` is set OR the user's
+// `CreditBalance` is at least `CreditCost`. `RequestedTTS` echoes the
+// provider the run will use end-to-end — the server pins the requested
+// provider with no auto-upgrade or fallback.
 type EstimateResponse struct {
 	RequestedTTS       string        `json:"requested_tts"`
-	EffectiveTTS       string        `json:"effective_tts"`
-	TTSUpgraded        bool          `json:"tts_upgraded"`
-	UpgradeReason      string        `json:"upgrade_reason,omitempty"`
-	AllowProviderSwap  bool          `json:"allow_provider_swap"`
 	Duration           string        `json:"duration"`
 	Format             string        `json:"format"`
 	SegmentEstimate    int           `json:"segment_estimate"`
@@ -509,15 +484,14 @@ type EstimateResponse struct {
 	CreditBalanceAfter int           `json:"credit_balance_after"`
 	CanAfford          bool          `json:"can_afford"`
 	BypassCredits      bool          `json:"bypass_credits"`
-	FallbackChain      []string      `json:"fallback_chain"`
 	Quota              EstimateQuota `json:"quota"`
 	Warnings           []string      `json:"warnings"`
 }
 
 // EstimatePodcast returns a preflight estimate for a podcast generation
 // without starting a job or spending credits. Use this before Generate to
-// preview the credit cost, the effective TTS provider after auto-upgrade
-// rules, the segment count, the fallback chain, and any warnings.
+// preview the credit cost, segment count, expected runtime, and any
+// quota warnings.
 //
 // Estimate and Generate share the same Go primitives on the server, so the
 // estimate is structurally guaranteed to match what Generate will actually do
@@ -685,8 +659,8 @@ type APIError struct {
 	// ResetsAt is the timestamp at which the provider's daily quota
 	// resets, populated for Code == "quota_exhausted" on Google-family
 	// providers (gemini, google, vertex-express, gemini-vertex reset at
-	// 00:00 America/Los_Angeles). Zero-value when the reset time is not
-	// calculable (ElevenLabs monthly, generic errors).
+	// 00:00 America/Los_Angeles). Zero-value for generic errors or
+	// providers without a calculable reset time.
 	ResetsAt time.Time
 }
 
@@ -712,9 +686,9 @@ func IsQuotaError(err error) bool {
 
 // QuotaResetsAt extracts the reset timestamp from a quota error. Returns
 // the zero value when err is not a quota error or when the server could
-// not determine the reset time (e.g. ElevenLabs monthly cap). Call this
-// on errors from Generate, GetPodcast, or WaitForCompletion to decide
-// when to tell the user they can try again.
+// not determine the reset time. Call this on errors from Generate,
+// GetPodcast, or WaitForCompletion to decide when to tell the user they
+// can try again.
 func QuotaResetsAt(err error) time.Time {
 	var apiErr *APIError
 	if errors.As(err, &apiErr) && apiErr.Code == "quota_exhausted" {

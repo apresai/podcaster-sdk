@@ -14,6 +14,129 @@ changes bump the minor version while the SDK is pre-1.0.
 
 ---
 
+## v0.5.0 — 2026-04-17
+
+### Removed
+
+- **`GenerateParams.AllowProviderSwap`**, **`EstimateParams.AllowProviderSwap`**,
+  **`EstimateResponse.AllowProviderSwap`** — the server deleted the
+  legacy cross-provider fallback path entirely, so these fields no longer
+  do anything on the wire. Callers that still pass them will get a
+  compile error; delete the line.
+- **`EstimateResponse.EffectiveTTS`**, **`EstimateResponse.TTSUpgraded`**,
+  **`EstimateResponse.UpgradeReason`**, **`EstimateResponse.FallbackChain`**
+  — the pre-flight auto-upgrade and fallback chain are gone. The estimate
+  now reports only `RequestedTTS` because that is exactly what the run
+  will use. Read `RequestedTTS` wherever you previously read
+  `EffectiveTTS`.
+- **`GenerateParams.TTSStability`** — ElevenLabs-only parameter;
+  ElevenLabs is no longer a supported TTS provider (see below).
+- **`EstimateParams.ElevenLabsAPIKey`** — same reason. BYOK is still
+  supported for Gemini via `GeminiAPIKey`.
+
+### Server changes reflected in this release
+
+These are changes on the production REST API
+(`podcasts.apresai.dev/api/v1`) that landed alongside this SDK release.
+They are live for every caller, regardless of SDK version — listing
+them here so you know the server contract you're talking to.
+
+- **Cross-provider fallback is deleted, not just default-off.** The
+  server now runs one TTS provider end-to-end for every podcast. If the
+  requested provider hits its daily quota mid-synthesis or returns
+  persistent empty audio, the job fails cleanly with a typed error and
+  the credits spent on it are refunded. There is no `AllowProviderSwap`
+  on the server anymore, so setting it on the SDK struct was already a
+  no-op in production — this release just makes that obvious at compile
+  time.
+- **ElevenLabs is no longer a supported TTS provider.** The
+  `elevenlabs` value on the `tts` field is rejected. Currently supported
+  providers: `gemini`, `vertex-express`, `gemini-vertex`, `google`,
+  `polly`. Multi-speaker batch synthesis is supported on all Gemini-
+  family providers (`gemini`, `vertex-express`, `gemini-vertex`,
+  `google`) and Polly.
+- **`POST /api/v1/podcasts/estimate` response shape is slimmer.**
+  `effective_tts`, `tts_upgraded`, `upgrade_reason`, `allow_provider_swap`,
+  and `fallback_chain` are no longer emitted. `credit_multiplier` on
+  `TTSProviderInfo` is always `1` and retained only for forward
+  compatibility.
+
+### Upgrade from v0.4.0
+
+Your code will fail to compile against v0.5.0 in three ways, each with
+a mechanical fix. Apply them in order, then run `go build ./...` and
+`go vet ./...` to verify.
+
+**1. Delete `AllowProviderSwap` from every struct literal.**
+
+```
+grep -rn "AllowProviderSwap" .
+```
+
+For each hit, delete the field. `AllowProviderSwap: false` just means
+"use the default," which is what v0.5.0 always does; `AllowProviderSwap:
+true` is no longer possible because the server no longer has that
+feature. If the calling code depended on `AllowProviderSwap: true` for
+long/deep durations to succeed, pick a higher-quota provider directly
+(`vertex-express`, `gemini-vertex`, or `google`) instead of `gemini`.
+
+```
+// Before (v0.4.0)
+podcaster.GenerateParams{
+    InputURL:          "https://...",
+    Duration:          podcaster.DurationLong,
+    TTS:               "gemini",
+    AllowProviderSwap: true, // DELETE
+}
+
+// After (v0.5.0)
+podcaster.GenerateParams{
+    InputURL: "https://...",
+    Duration: podcaster.DurationLong,
+    TTS:      "google",    // explicitly pick a higher-quota provider
+}
+```
+
+**2. Replace `EffectiveTTS` reads with `RequestedTTS`.**
+
+```
+grep -rn "EffectiveTTS\|TTSUpgraded\|UpgradeReason\|FallbackChain" .
+```
+
+`RequestedTTS` is now authoritative for what the run will use. Delete
+any branches that checked `TTSUpgraded` / `UpgradeReason` /
+`FallbackChain` — they never fire anymore because the server doesn't
+upgrade or fall back.
+
+```
+// Before (v0.4.0)
+if est.TTSUpgraded {
+    fmt.Printf("server will use %s (upgraded from %s): %s\n",
+        est.EffectiveTTS, est.RequestedTTS, est.UpgradeReason)
+}
+
+// After (v0.5.0)
+fmt.Printf("server will use %s\n", est.RequestedTTS)
+```
+
+**3. Delete `TTSStability` and `ElevenLabsAPIKey` calls.**
+
+```
+grep -rn "TTSStability\|ElevenLabsAPIKey\|\"elevenlabs\"" .
+```
+
+If your code set `TTS: "elevenlabs"`, switch to `gemini` /
+`vertex-express` / `gemini-vertex` / `google` / `polly`. Everything
+referencing `TTSStability` or `ElevenLabsAPIKey` should be deleted
+outright — those parameters existed only for ElevenLabs.
+
+After the three passes, `go build ./...` and `go vet ./...` should come
+back clean. The test suite on the server side is unchanged — a working
+v0.4.0 call that didn't use any removed fields still works on v0.5.0
+with the same runtime behavior.
+
+---
+
 ## v0.4.0 — 2026-04-15
 
 ### Added

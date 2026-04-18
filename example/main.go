@@ -35,12 +35,11 @@ func main() {
 	}
 	fmt.Println()
 
-	// 2. Start a wine & food blog podcast. AllowProviderSwap is left false
-	// (default) so the server pins the requested TTS provider end-to-end.
-	// If you'd rather have the server silently fall back to a sibling
-	// provider on quota / empty-audio errors, set AllowProviderSwap: true
-	// — but voices may drift mid-episode because sibling providers use
-	// different synthesis engines. Leave it false for brand voices.
+	// 2. Start a wine & food blog podcast. The server pins the requested
+	// TTS provider end-to-end — no auto-upgrade, no mid-run fallback.
+	// Quota exhaustion or persistent empty-audio errors surface as a
+	// typed *APIError (see IsQuotaError below) and the credits spent on
+	// the job are refunded.
 	job, err := client.Generate(ctx, podcaster.GenerateParams{
 		InputURL: "https://en.wikipedia.org/wiki/Wine",
 		Category: "wine-food-blog",
