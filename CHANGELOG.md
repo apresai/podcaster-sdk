@@ -14,6 +14,117 @@ changes bump the minor version while the SDK is pre-1.0.
 
 ---
 
+## v0.5.2 — 2026-05-09
+
+### Server changes reflected in this release
+
+No Go code changes in the SDK. This release documents a server-side
+default-value flip that consumers will observe on the wire.
+
+- **Default `tts_provider` flipped from `gemini` to `google`** (Cloud TTS
+  Chirp 3 HD). The Gemini AI Studio TTS preview API produced inconsistent
+  voice character between renders — listeners heard that drift as
+  "voice switching mid-podcast" when the pipeline ran per-segment.
+  Sister project `sophie` hit the same bug in early 2026 and migrated
+  off the engine; the podcaster server follows the same fix. Reference:
+  https://discuss.ai.google.dev/t/gemini-tts-voice-consistency/124172.
+
+  The `gemini` provider is still available for explicit opt-in (your
+  code passing `TTS: "gemini"` continues to work and continues to call
+  AI Studio). It is now marked legacy in the OpenAPI spec, the portal
+  copy, and the CLAUDE.md TTS Providers table.
+
+- **What this means for SDK consumers**: requests that omit the `tts`
+  field — or explicitly send `tts: ""` — now resolve to `"google"` on
+  the server. The `Podcast.TTSProvider` and `EstimateResponse.RequestedTTS`
+  fields in your responses will report `"google"` instead of `"gemini"`
+  for default-resolved jobs. No struct field types changed; your code
+  compiles and runs unchanged.
+
+- **`audio_truncated` error code** added to the server's typed-error
+  taxonomy. The pipeline now rejects a podcast whose final-MP3 duration
+  is below 50% of the 150-wpm prediction (a class of failure observed
+  with the Gemini Preview engine where every per-segment validation
+  passed but the whole podcast came back systematically short). When
+  the gate fires, credits refund cleanly and `Podcast.ErrorCode ==
+  "audio_truncated"`. Like other `error_code` values, this is a string
+  enum your existing handlers can switch on.
+
+### Upgrade from v0.5.1
+
+No code change required. To get the new default behavior, simply omit
+the `TTS` field:
+
+```go
+// Before — explicitly opting into the legacy engine:
+job, err := client.Generate(ctx, podcaster.GenerateParams{
+    InputURL: "https://example.com/article",
+    TTS:      "gemini",
+})
+
+// After — let the server pick the stable default:
+job, err := client.Generate(ctx, podcaster.GenerateParams{
+    InputURL: "https://example.com/article",
+    // TTS omitted — server will use "google" (Cloud TTS Chirp 3 HD)
+})
+```
+
+If your code reads `Podcast.TTSProvider` or
+`EstimateResponse.RequestedTTS` and switches on the string value, audit
+those switches: a default-resolved job will now hand back `"google"`
+where it used to hand back `"gemini"`.
+
+If your code handles `Podcast.ErrorCode`, consider adding a case for
+the new `"audio_truncated"` value:
+
+```go
+switch podcast.ErrorCode {
+case "quota_exhausted":
+    // wait until podcaster.QuotaResetsAt(err) or pick a higher-quota provider
+case "empty_audio_persistent":
+    // retry with a different tts provider — this one can't synthesize this text
+case "audio_truncated":
+    // the produced MP3 was much shorter than the script predicted — retry
+case "shutdown", "stuck":
+    // server-side interrupt; caller can safely re-submit
+case "panic":
+    // server bug; credits refunded; do not retry without debug info
+}
+```
+
+#### Agent upgrade checklist
+
+For AI assistants upgrading consumer code mechanically:
+
+1. **Find request sites that pass `TTS: "gemini"` explicitly:**
+   ```bash
+   grep -rn 'TTS:[[:space:]]*"gemini"' --include='*.go' .
+   ```
+   Each match is a deliberate opt-in to the legacy engine. Either:
+   - Remove the line entirely so the default kicks in (recommended for new code), OR
+   - Leave it untouched and add a code comment noting the voice-drift
+     trade-off so the next reader knows it was an intentional choice.
+   - DO NOT silently rewrite to `"google"` — the existing line is a
+     deliberate choice; ask the user before changing.
+
+2. **Find response-shape switches on `TTSProvider` / `RequestedTTS`:**
+   ```bash
+   grep -rn 'TTSProvider\|RequestedTTS' --include='*.go' .
+   ```
+   For each `switch` or `if` that branches on a literal `"gemini"`,
+   confirm the expected branch is still correct now that default-resolved
+   jobs report `"google"`.
+
+3. **Find existing error-code switches:**
+   ```bash
+   grep -rn 'case "quota_exhausted"\|case "empty_audio_persistent"' --include='*.go' .
+   ```
+   Where present, add a `case "audio_truncated":` arm with a comment
+   explaining the recovery (retry — the server has already refunded
+   credits).
+
+---
+
 ## v0.5.1 — 2026-04-18
 
 ### Server changes reflected in this release
